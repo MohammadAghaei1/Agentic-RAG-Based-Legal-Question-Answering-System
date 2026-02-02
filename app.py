@@ -22,6 +22,18 @@ else:
         "Set it in your .env file if you want to use OpenAI."
     )
 
+# Check for Hugging Face Token (New)
+# Uses the standard key names identified in your llm_provider
+hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("HF_TOKEN")
+
+if hf_token:
+    st.caption("🤗 Hugging Face Token loaded from .env")
+else:
+    st.warning(
+        "HUGGINGFACEHUB_API_TOKEN not found in environment. "
+        "Set it in your .env file if you want to use Hugging Face models."
+    )
+
 st.markdown(
     """
 Welcome!  

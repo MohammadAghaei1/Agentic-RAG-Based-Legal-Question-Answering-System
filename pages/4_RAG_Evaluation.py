@@ -8,6 +8,9 @@ from typing import List, Dict, Any
 import streamlit as st
 from datasets import Dataset
 
+from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings import LangchainEmbeddingsWrapper
+
 from ragas import evaluate
 from ragas.metrics import (
     answer_relevancy,
@@ -20,6 +23,10 @@ from ragas.metrics import (
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from backend.config import RAGConfig
+
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingFaceEmbeddings
 
 CHAT_DB_PATH = Path("chat_sessions.json")
 
@@ -128,29 +135,46 @@ def build_ragas_dataset_from_chats(chat_db: List[Dict[str, Any]]) -> Dataset:
 # ---------------------------------------------------------------------
 # Ragas evaluation models (OpenAI via LangChain)
 # ---------------------------------------------------------------------
+
 def get_ragas_models():
     """
-    Create LangChain LLM + embeddings for Ragas to use.
-
-    Uses:
-      - ChatOpenAI("gpt-4o-mini")
-      - OpenAIEmbeddings("text-embedding-3-small")
+    Dynamically creates models for Ragas evaluation.
+    Prioritizes OpenAI if key exists, otherwise uses Hugging Face.
     """
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError(
-            "OPENAI_API_KEY is not set. Please add it to your .env "
-            "or environment before running RAGAS evaluation."
+    openai_key = os.getenv("OPENAI_API_KEY")
+    hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("HF_TOKEN")
+
+    # --- Option A: OpenAI Path ---
+    if openai_key:
+        eval_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+        eval_embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        return eval_llm, eval_embeddings
+
+    # --- Option B: Hugging Face Path ---
+    if hf_token:
+        # Example model: Mistral or Llama-3 via Inference API
+        repo_id = "meta-llama/Llama-3.3-70B-Instruct" 
+        
+        base_llm = HuggingFaceEndpoint(
+            repo_id=repo_id,
+            task="text-generation",
+            max_new_tokens=512,
+            huggingfacehub_api_token=hf_token
         )
+        eval_llm = ChatHuggingFace(llm=base_llm)
+        
+        # Open source embedding model
+        eval_embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={'device': 'cpu'}
+        )
+        return eval_llm, eval_embeddings
 
-    eval_llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.0,
+    # --- Option C: Error ---
+    raise RuntimeError(
+        "No valid API tokens found! Please set OPENAI_API_KEY or "
+        "HUGGINGFACEHUB_API_TOKEN in your .env file."
     )
-    eval_embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",
-    )
-    return eval_llm, eval_embeddings
-
 
 # ---------------------------------------------------------------------
 # Streamlit UI
@@ -313,12 +337,16 @@ dataset_eval = Dataset.from_pandas(df_eval, preserve_index=False)
 # ---------------------------------------------------------------------
 if st.button("Run RAGAS evaluation"):
     try:
-        eval_llm, eval_embeddings = get_ragas_models()
+        # 1. Retrieve the raw models based on your .env tokens
+        llm, embeddings = get_ragas_models()
     except RuntimeError as e:
         st.error(str(e))
         st.stop()
 
-    # Metrics to compute:
+    # 2. Wrap them specifically for the Ragas evaluation framework
+    evaluator_llm = LangchainLLMWrapper(llm)
+    evaluator_embeddings = LangchainEmbeddingsWrapper(embeddings)
+
     metrics = [
         context_precision,
         context_recall,
@@ -329,11 +357,12 @@ if st.button("Run RAGAS evaluation"):
 
     with st.spinner("Running RAGAS metrics..."):
         try:
+            # 3. Pass the wrapped models into the evaluate call
             result = evaluate(
                 dataset=dataset_eval,
                 metrics=metrics,
-                llm=eval_llm,
-                embeddings=eval_embeddings,
+                llm=evaluator_llm,          # The LLM acting as 'Judge'
+                embeddings=evaluator_embeddings,  # The Embedding tool for similarity
                 show_progress=True,
             )
         except Exception as e:
